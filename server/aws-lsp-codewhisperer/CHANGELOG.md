@@ -1,5 +1,52 @@
 # Changelog
 
+## [0.0.33](https://github.com/aws/language-servers/compare/lsp-codewhisperer/v0.0.32...lsp-codewhisperer/v0.0.33) (2025-04-17)
+
+
+### Features
+
+* add enablerazorviewtransform ([527ae03](https://github.com/aws/language-servers/commit/527ae03521642e9b6940f3ba71ca61327d8d28b8))
+* add IAM Q Streaming Client to language-servers ([#927](https://github.com/aws/language-servers/issues/927)) ([ef89fdf](https://github.com/aws/language-servers/commit/ef89fdf228f4799a29a22a60dc105ade4ee99ab3))
+* add iam support in q chat server and q agentic server ([#945](https://github.com/aws/language-servers/issues/945)) ([2ac19b7](https://github.com/aws/language-servers/commit/2ac19b76731cb07bd7a5621c049b9c9ff18a8d45))
+* add proper windows support for executeBash and remove mocks in tests. ([#934](https://github.com/aws/language-servers/issues/934)) ([148062f](https://github.com/aws/language-servers/commit/148062f51d9ef54fdce7be5658bb878b6a9fccc7))
+* add text based tool updates for agentic-chat ([#984](https://github.com/aws/language-servers/issues/984)) ([12dc8d7](https://github.com/aws/language-servers/commit/12dc8d767be42d04d50303143e1a551fb103bdc5))
+* add tools to request in agentic chat controller and log tool usages ([39e9472](https://github.com/aws/language-servers/commit/39e947286e64d80677d231b87cf62acab16e756b))
+* added icons to help and clear action ([#942](https://github.com/aws/language-servers/issues/942)) ([694bbb8](https://github.com/aws/language-servers/commit/694bbb85580cc79313d65ad77b224875f74280c2))
+* allow generateAssistantResponse throughout chatSession and triggerContext ([091f99f](https://github.com/aws/language-servers/commit/091f99f6535de981efecc7b07337e027432a35e2))
+* **amazonq:** centralize configuration handling to base service manager class ([#906](https://github.com/aws/language-servers/issues/906)) ([b3aa8fa](https://github.com/aws/language-servers/commit/b3aa8fa54c7b13144fd8a924b1ad6e4f4a25fca4))
+* **amazonq:** chat history and conversation persistence ([#941](https://github.com/aws/language-servers/issues/941)) ([bf944e0](https://github.com/aws/language-servers/commit/bf944e08e6044eb286a16ba451e70dbc5d88837a))
+* **chat-client:** implement export conversation flow ([#944](https://github.com/aws/language-servers/issues/944)) ([63fd2dc](https://github.com/aws/language-servers/commit/63fd2dc773e742c47040fd66aac4912664d91dd0))
+* enable different variants in tool usage, inputs, and results ([0707d86](https://github.com/aws/language-servers/commit/0707d866893052ebcf15d9b205304852f19a555b))
+* initial support for local project context ([#949](https://github.com/aws/language-servers/issues/949)) ([1318d29](https://github.com/aws/language-servers/commit/1318d294307d77ffd43e70828afb98788b871295))
+* loop until the model does no longer return tool usages ([4f2eb3c](https://github.com/aws/language-servers/commit/4f2eb3c03182a9aea8b7682a959afb820fa9d0dd))
+* port executeBash tool from VSC ([#912](https://github.com/aws/language-servers/issues/912)) ([1ccba58](https://github.com/aws/language-servers/commit/1ccba58a9e339ab7d5e4370cf40fa7268f802fd8))
+* port listDirectory from VSC ([#930](https://github.com/aws/language-servers/issues/930)) ([7feb127](https://github.com/aws/language-servers/commit/7feb127f33570d2349852781e16cc9d6763a92b8))
+* support generateAssistantResponse as well as sendMessage ([a96f864](https://github.com/aws/language-servers/commit/a96f86444147757f20cc1fd033b018a12c915622))
+
+
+### Bug Fixes
+
+* add onTabBarAction and getSerializedChat to Omit list of Chat handlers temporarily ([#961](https://github.com/aws/language-servers/issues/961)) ([573588c](https://github.com/aws/language-servers/commit/573588c2929b97594660d6b256f1c6353bc8c2bc))
+* **amazonq:** add cancel support to loading developer profiles ([#940](https://github.com/aws/language-servers/issues/940)) ([d07f79a](https://github.com/aws/language-servers/commit/d07f79a54d259024d0e8331122d718ee0b461864))
+* **amazonq:** add missing paginator to list profiles call ([#938](https://github.com/aws/language-servers/issues/938)) ([0435c80](https://github.com/aws/language-servers/commit/0435c80b05fd3c7065da7f831e1e2d9281da0b2e))
+* **amazonq:** add regionalization support to .NET Transform server ([#952](https://github.com/aws/language-servers/issues/952)) ([7571ffd](https://github.com/aws/language-servers/commit/7571ffdb87662698da0c086dad18a9db4947ce08))
+* **amazonq:** fetch profiles only for requested profile region when updating profile ([4793504](https://github.com/aws/language-servers/commit/4793504f10713f0685c1766fb0123172104e6f4c))
+* **chat-client:** disable click event for empty history list item ([#973](https://github.com/aws/language-servers/issues/973)) ([bc20a04](https://github.com/aws/language-servers/commit/bc20a04277a7b603e0d0c5e623c87b2a5c4dc4d4))
+* disable timeout for tests in aws-lsp-codewhisperer and core packages ([#955](https://github.com/aws/language-servers/issues/955)) ([254e36c](https://github.com/aws/language-servers/commit/254e36cf1a34b114a9397c688784293367dc1d63))
+* fix execute bash test command failing on pipeline ([#956](https://github.com/aws/language-servers/issues/956)) ([461957d](https://github.com/aws/language-servers/commit/461957dc7856ca3490ccdd756e6dd4cb1351698c))
+* handle indexing library import when require.main is undefined ([#982](https://github.com/aws/language-servers/issues/982)) ([f5dac38](https://github.com/aws/language-servers/commit/f5dac38c03585ee5001beddbccd8a184bb48c5a7))
+* handle undefined workspace folders in context controller ([#964](https://github.com/aws/language-servers/issues/964)) ([a01262c](https://github.com/aws/language-servers/commit/a01262cf0fc94134b6f00c9d2806c99796233551))
+* hardcoded class and function names logging to avoid uglified naming when bundled ([#909](https://github.com/aws/language-servers/issues/909)) ([68e692a](https://github.com/aws/language-servers/commit/68e692a754a1262261e734a7ac85468e6470db17))
+* propagate errors from tools back to the model invocation ([d296091](https://github.com/aws/language-servers/commit/d2960913f886452742e5a4be6b18c9511595eaa3))
+* temporary fix for error where undefined is being passed to path.join ([#980](https://github.com/aws/language-servers/issues/980)) ([49e717c](https://github.com/aws/language-servers/commit/49e717cc22b67e954b2362c64a75945c3a6f72bb))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @aws/lsp-core bumped from ^0.0.3 to ^0.0.4
+
 ## [0.0.32](https://github.com/aws/language-servers/compare/lsp-codewhisperer/v0.0.31...lsp-codewhisperer/v0.0.32) (2025-04-08)
 
 
