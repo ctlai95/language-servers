@@ -133,6 +133,6 @@ describe('Test CodeWhisperer Agent Server', async () => {
 
         expect(decryptedResult).to.have.property('messageId')
         expect(decryptedResult).to.have.property('body')
-        expect(decryptedResult).to.not.be.empty
+        expect(decryptedResult.body).to.not.be.empty
     })
 })

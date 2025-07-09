@@ -5,7 +5,7 @@ on:
         workflows: [Create agent-standalone bundles]
         types:
             - completed
-        branches: [main, feature/*, release/agentic/*, integ-tests] # todo: remove integ-tests before merge
+        branches: [main, feature/*, release/agentic/*]
 
 jobs:
     agent-server-tests:
