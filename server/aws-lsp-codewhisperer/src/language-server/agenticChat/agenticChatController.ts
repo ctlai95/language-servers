@@ -10,7 +10,6 @@ import {
     ChatTriggerType,
     Origin,
     ToolResult,
-    ToolResultContentBlock,
     ToolResultStatus,
     ToolUse,
     ToolUseEvent,
@@ -20,11 +19,7 @@ import {
     FS_READ,
     FS_WRITE,
     FS_REPLACE,
-    LIST_DIRECTORY,
-    GREP_SEARCH,
-    FILE_SEARCH,
     EXECUTE_BASH,
-    CODE_REVIEW,
     BUTTON_RUN_SHELL_COMMAND,
     BUTTON_REJECT_SHELL_COMMAND,
     BUTTON_REJECT_MCP_TOOL,
@@ -45,16 +40,13 @@ import {
     ChatCommandOutput,
 } from '../../shared/streamingClientService'
 import {
-    Button,
     Status,
     ButtonClickParams,
     ButtonClickResult,
-    ChatMessage,
     chatRequestType,
     FileDetails,
     InlineChatResultParams,
     PromptInputOptionChangeParams,
-    TextDocument,
     RuleClickParams,
     ListRulesParams,
     ActiveEditorChangedParams,
@@ -145,7 +137,6 @@ import {
 } from './agenticChatEventParser'
 import { ChatSessionService } from '../chat/chatSessionService'
 import { AgenticChatResultStream, progressPrefix, ResultStreamWriter } from './agenticChatResultStream'
-import { toolResultMessage } from './textFormatting'
 import {
     AdditionalContentEntryAddition,
     AgenticChatTriggerContext,
@@ -161,17 +152,11 @@ import {
 import { ContextCommandsProvider } from './context/contextCommandsProvider'
 import { LocalProjectContextController } from '../../shared/localProjectContextController'
 import { CancellationError, workspaceUtils } from '@aws/lsp-core'
-import { FsRead, FsReadParams } from './tools/fsRead'
-import { ListDirectory, ListDirectoryParams } from './tools/listDirectory'
-import { FsWrite, FsWriteParams } from './tools/fsWrite'
-import { ExecuteBash, ExecuteBashParams } from './tools/executeBash'
-import { ExplanatoryParams, InvokeOutput, ToolApprovalException } from './tools/toolShared'
-import { validatePathBasic, validatePathExists, validatePaths as validatePathsSync } from './utils/pathValidation'
-import { GrepSearch, SanitizedRipgrepOutput } from './tools/grepSearch'
-import { FileSearch, FileSearchParams } from './tools/fileSearch'
-import { FsReplace, FsReplaceParams } from './tools/fsReplace'
+import { FsWriteParams } from './tools/fsWrite'
+import { ExecuteBashParams } from './tools/executeBash'
+import { ToolApprovalException } from './tools/toolShared'
+import { FsReplaceParams } from './tools/fsReplace'
 import { loggingUtils, timeoutUtils } from '@aws/lsp-core'
-import { diffLines } from 'diff'
 import {
     GENERIC_ERROR_MS,
     LOADING_THRESHOLD_MS,
@@ -182,33 +167,19 @@ import {
     DEFAULT_MODEL_ID,
     COMPACTION_BODY,
     COMPACTION_HEADER_BODY,
-    DEFAULT_MACOS_RUN_SHORTCUT,
-    DEFAULT_WINDOW_RUN_SHORTCUT,
-    DEFAULT_MACOS_REJECT_SHORTCUT,
-    DEFAULT_WINDOW_REJECT_SHORTCUT,
-    DEFAULT_MACOS_STOP_SHORTCUT,
-    DEFAULT_WINDOW_STOP_SHORTCUT,
 } from './constants/constants'
 import {
     AgenticChatError,
     customerFacingErrorCodes,
-    getCustomerFacingErrorMessage,
     isRequestAbortedError,
     isThrottlingRelated,
     unactionableErrorCodes,
 } from './errors'
 import { URI } from 'vscode-uri'
-import { CommandCategory } from './tools/executeBash'
 import { UserWrittenCodeTracker } from '../../shared/userWrittenCodeTracker'
-import { CodeReview } from './tools/qCodeAnalysis/codeReview'
-import {
-    CODE_REVIEW_FINDINGS_MESSAGE_SUFFIX,
-    DISPLAY_FINDINGS_MESSAGE_SUFFIX,
-} from './tools/qCodeAnalysis/codeReviewConstants'
 import { McpEventHandler } from './tools/mcp/mcpEventHandler'
 import { enabledMCP, createNamespacedToolName } from './tools/mcp/mcpUtils'
 import { McpManager } from './tools/mcp/mcpManager'
-import { McpTool } from './tools/mcp/mcpTool'
 import {
     freeTierLimitUserMsg,
     onPaidTierLearnMore,
@@ -228,7 +199,9 @@ import { getLatestAvailableModel } from './utils/agenticChatControllerHelper'
 import { ActiveUserTracker } from '../../shared/activeUserTracker'
 import { UserContext } from '../../client/token/codewhispererbearertokenclient'
 import { CodeWhispererServiceToken } from '../../shared/codeWhispererService'
-import { DisplayFindings } from './tools/qCodeAnalysis/displayFindings'
+import { ToolExecutionManager } from './tools/toolExecutionManager'
+import { createDeferred } from './utils/promises'
+import { LatencyTracker } from './utils/latencyTracker'
 
 type ChatHandlers = Omit<
     LspHandlers<Chat>,
@@ -265,22 +238,15 @@ export class AgenticChatController implements ChatHandlers {
     #chatHistoryDb: ChatDatabase
     #additionalContextProvider: AdditionalContextProvider
     #contextCommandsProvider: ContextCommandsProvider
-    #stoppedToolUses = new Set<string>()
     #userWrittenCodeTracker: UserWrittenCodeTracker | undefined
-    #toolUseStartTimes: Record<string, number> = {}
-    #toolUseLatencies: Array<{ toolName: string; toolUseId: string; latency: number }> = []
     #mcpEventHandler: McpEventHandler
     #paidTierMode: PaidTierMode | undefined
     #origin: Origin
     #activeUserTracker: ActiveUserTracker
+    #toolExecutionManager: ToolExecutionManager
+    #latencyTracker: LatencyTracker
 
-    // latency metrics
-    #llmRequestStartTime: number = 0
     #toolCallLatencies: number[] = []
-    #toolStartTime: number = 0
-    #timeToFirstChunk: number = -1
-    #timeBetweenChunks: number[] = []
-    #lastChunkTime: number = 0
 
     // A/B testing allocation
     #abTestingFetchingTimeout: NodeJS.Timeout | undefined
@@ -290,20 +256,6 @@ export class AgenticChatController implements ChatHandlers {
               userVariation: string
           }
         | undefined
-
-    /**
-     * Determines the appropriate message ID for a tool use based on tool type and name
-     * @param toolType The type of tool being used
-     * @param toolUse The tool use object
-     * @returns The message ID to use
-     */
-    #getMessageIdForToolUse(toolType: string | undefined, toolUse: ToolUse): string {
-        const toolUseId = toolUse.toolUseId!
-        // Return plain toolUseId for executeBash, add "_permission" suffix for all other tools
-        return toolUse.name === EXECUTE_BASH || toolType === EXECUTE_BASH
-            ? toolUseId
-            : `${toolUseId}${SUFFIX_PERMISSION}`
-    }
 
     /**
      * Logs system information that can be helpful for debugging customer issues
@@ -368,6 +320,15 @@ export class AgenticChatController implements ChatHandlers {
         this.#mcpEventHandler = new McpEventHandler(features, telemetryService)
         this.#origin = getOriginFromClientInfo(this.#features.lsp.getClientInitializeParams()?.clientInfo?.name)
         this.#activeUserTracker = ActiveUserTracker.getInstance(this.#features)
+
+        this.#latencyTracker = new LatencyTracker(this.#features)
+        this.#toolExecutionManager = new ToolExecutionManager(
+            this.#features,
+            this.#triggerContext,
+            this.#telemetryController,
+            this.#additionalContextProvider,
+            this.#latencyTracker
+        )
     }
 
     async onExecuteCommand(params: ExecuteCommandParams, _token: CancellationToken): Promise<any> {
@@ -411,7 +372,7 @@ export class AgenticChatController implements ChatHandlers {
             params.buttonId === BUTTON_REJECT_SHELL_COMMAND || params.buttonId === BUTTON_REJECT_MCP_TOOL
                 ? (() => {
                       handler.reject(new ToolApprovalException('Command was rejected.', true))
-                      this.#stoppedToolUses.add(messageId)
+                      this.#toolExecutionManager.stoppedToolUses.add(messageId)
                   })()
                 : handler.resolve()
             return {
@@ -443,7 +404,7 @@ export class AgenticChatController implements ChatHandlers {
                 success: true,
             }
         } else if (params.buttonId === BUTTON_STOP_SHELL_COMMAND) {
-            this.#stoppedToolUses.add(params.messageId)
+            this.#toolExecutionManager.stoppedToolUses.add(params.messageId)
             await this.#renderStoppedShellCommand(params.tabId, params.messageId)
             return { success: true }
         } else if (params.buttonId === BUTTON_PAIDTIER_UPGRADE_Q_LEARNMORE) {
@@ -1006,8 +967,7 @@ export class AgenticChatController implements ChatHandlers {
 
         this.#debug(`Running compaction for conversation id:`, conversationIdentifier || '')
 
-        this.#timeToFirstChunk = -1
-        this.#timeBetweenChunks = []
+        this.#latencyTracker.reset()
 
         // Check for cancellation
         if (this.#isPromptCanceled(token, session, promptId)) {
@@ -1083,7 +1043,7 @@ export class AgenticChatController implements ChatHandlers {
         await chatResultStream.writeResultBlock({ ...loadingMessage, messageId: loadingMessageId })
 
         this.#debug(`Compacting history with ${characterCount} characters`)
-        this.#llmRequestStartTime = Date.now()
+        this.#latencyTracker.setLlmRequestStartTime(Date.now())
         // Phase 3: Request Execution
         currentRequestInput = sanitizeRequestInput(currentRequestInput)
         this.#debug(`Compaction Request: ${JSON.stringify(currentRequestInput, undefined, 2)}`)
@@ -1109,7 +1069,7 @@ export class AgenticChatController implements ChatHandlers {
             true
         )
 
-        const llmLatency = Date.now() - this.#llmRequestStartTime
+        const llmLatency = Date.now() - this.#latencyTracker.llmRequestStartTime
         this.#debug(`LLM Response Latency for compaction: ${llmLatency}`)
         this.#telemetryController.emitAgencticLoop_InvokeLLM(
             response.$metadata.requestId!,
@@ -1122,8 +1082,8 @@ export class AgenticChatController implements ChatHandlers {
             session.modelId,
             llmLatency,
             [],
-            this.#timeToFirstChunk,
-            this.#timeBetweenChunks,
+            this.#latencyTracker.timeToFirstChunk,
+            this.#latencyTracker.timeBetweenChunks,
             session.pairProgrammingMode
         )
 
@@ -1171,8 +1131,7 @@ export class AgenticChatController implements ChatHandlers {
             this.#debug(`Agent loop iteration ${iterationCount} for conversation id:`, conversationIdentifier || '')
 
             this.#toolCallLatencies = []
-            this.#timeToFirstChunk = -1
-            this.#timeBetweenChunks = []
+            this.#latencyTracker.reset()
 
             // Check for cancellation
             if (this.#isPromptCanceled(token, session, promptId)) {
@@ -1231,7 +1190,7 @@ export class AgenticChatController implements ChatHandlers {
             const loadingMessageId = `loading-${uuid()}`
             await chatResultStream.writeResultBlock({ ...loadingMessage, messageId: loadingMessageId })
 
-            this.#llmRequestStartTime = Date.now()
+            this.#latencyTracker.setLlmRequestStartTime(Date.now())
             // Phase 3: Request Execution
             currentRequestInput = sanitizeRequestInput(currentRequestInput)
             // Note: these logs are very noisy, but contain information redacted on the backend.
@@ -1281,7 +1240,7 @@ export class AgenticChatController implements ChatHandlers {
                 session,
                 documentReference
             )
-            const llmLatency = Date.now() - this.#llmRequestStartTime
+            const llmLatency = Date.now() - this.#latencyTracker.llmRequestStartTime
             this.#debug(`LLM Response Latency: ${llmLatency}`)
             // This is needed to handle the case where the response stream times out
             // and we want to auto-retry
@@ -1353,8 +1312,8 @@ export class AgenticChatController implements ChatHandlers {
                     session.modelId,
                     llmLatency,
                     this.#toolCallLatencies,
-                    this.#timeToFirstChunk,
-                    this.#timeBetweenChunks,
+                    this.#latencyTracker.timeToFirstChunk,
+                    this.#latencyTracker.timeBetweenChunks,
                     session.pairProgrammingMode,
                     this.#abTestingAllocation?.experimentName,
                     this.#abTestingAllocation?.userVariation
@@ -1368,18 +1327,25 @@ export class AgenticChatController implements ChatHandlers {
             session.setConversationType('AgenticChatWithToolUse')
             if (result.success) {
                 // Process tool uses and update the request input for the next iteration
-                toolResults = await this.#processToolUses(pendingToolUses, chatResultStream, session, tabId, token)
+                toolResults = await this.#toolExecutionManager.processToolUses(
+                    pendingToolUses,
+                    chatResultStream,
+                    session,
+                    tabId,
+                    this.#abTestingAllocation,
+                    token
+                )
                 if (toolResults.some(toolResult => this.#shouldSendBackErrorContent(toolResult))) {
                     content = 'There was an error processing one or more tool uses. Try again, do not apologize.'
                     shouldDisplayMessage = false
                 }
-                const toolCallLatency = Date.now() - this.#toolStartTime
+                const toolCallLatency = Date.now() - this.#toolExecutionManager.toolStartTime
                 this.#toolCallLatencies.push(toolCallLatency)
                 const conversationType = session.getConversationType() as ChatConversationType
                 metric.setDimension('cwsprChatConversationType', conversationType)
                 metric.setDimension('requestIds', metric.metric.requestIds)
-                const toolNames = this.#toolUseLatencies.map(item => item.toolName)
-                const toolUseIds = this.#toolUseLatencies.map(item => item.toolUseId)
+                const toolNames = this.#toolExecutionManager.toolUseLatencies.map(item => item.toolName)
+                const toolUseIds = this.#toolExecutionManager.toolUseLatencies.map(item => item.toolUseId)
                 this.#telemetryController.emitAgencticLoop_InvokeLLM(
                     response.$metadata.requestId!,
                     conversationId,
@@ -1391,8 +1357,8 @@ export class AgenticChatController implements ChatHandlers {
                     session.modelId,
                     llmLatency,
                     this.#toolCallLatencies,
-                    this.#timeToFirstChunk,
-                    this.#timeBetweenChunks,
+                    this.#latencyTracker.timeToFirstChunk,
+                    this.#latencyTracker.timeBetweenChunks,
                     session.pairProgrammingMode,
                     this.#abTestingAllocation?.experimentName,
                     this.#abTestingAllocation?.userVariation
@@ -1415,8 +1381,8 @@ export class AgenticChatController implements ChatHandlers {
                     session.modelId,
                     llmLatency,
                     this.#toolCallLatencies,
-                    this.#timeToFirstChunk,
-                    this.#timeBetweenChunks,
+                    this.#latencyTracker.timeToFirstChunk,
+                    this.#latencyTracker.timeBetweenChunks,
                     session.pairProgrammingMode,
                     this.#abTestingAllocation?.experimentName,
                     this.#abTestingAllocation?.userVariation
@@ -1429,9 +1395,9 @@ export class AgenticChatController implements ChatHandlers {
                 // set the in progress tool use UI status to Error
                 await chatResultStream.updateOngoingProgressResult('Error')
             }
-            if (result.success && this.#toolUseLatencies.length > 0) {
+            if (result.success && this.#toolExecutionManager.toolUseLatencies.length > 0) {
                 // Clear latencies for the next LLM call
-                this.#toolUseLatencies = []
+                this.#toolExecutionManager.clearToolUseLatencies()
             }
             currentRequestInput = this.#updateRequestInputWithToolResults(currentRequestInput, toolResults, content)
         }
@@ -1610,522 +1576,6 @@ export class AgenticChatController implements ChatHandlers {
         return Object.values(toolUses).filter(toolUse => toolUse.stop)
     }
 
-    /**
-     * Creates a promise that does not resolve until the user accepts or rejects the tool usage.
-     * @param toolUseId
-     * @param toolUseName
-     * @param resultStream
-     * @param promptBlockId id of approval block. This allows us to overwrite the buttons with 'accepted' or 'rejected' text.
-     * @param session
-     */
-    async waitForToolApproval(
-        toolUse: ToolUse,
-        resultStream: AgenticChatResultStream,
-        promptBlockId: number,
-        session: ChatSessionService,
-        toolName: string
-    ) {
-        const deferred = this.#createDeferred()
-        session.setDeferredToolExecution(toolUse.toolUseId!, deferred.resolve, deferred.reject)
-        this.#log(`Prompting for tool approval for tool: ${toolName ?? toolUse.name}`)
-        await deferred.promise
-        // Note: we want to overwrite the button block because it already exists in the stream.
-        await resultStream.overwriteResultBlock(
-            this.#getUpdateToolConfirmResult(toolUse, true, toolName),
-            promptBlockId
-        )
-    }
-
-    /**
-     * Processes tool uses by running the tools and collecting results
-     */
-    async #processToolUses(
-        toolUses: Array<ToolUse & { stop: boolean }>,
-        chatResultStream: AgenticChatResultStream,
-        session: ChatSessionService,
-        tabId: string,
-        token?: CancellationToken
-    ): Promise<ToolResult[]> {
-        const results: ToolResult[] = []
-
-        for (const toolUse of toolUses) {
-            // Store buttonBlockId to use it in `catch` block if needed
-            let cachedButtonBlockId
-            if (!toolUse.name || !toolUse.toolUseId) continue
-            session.toolUseLookup.set(toolUse.toolUseId, toolUse)
-
-            // Record the start time for this tool use for latency calculation
-            if (toolUse.toolUseId) {
-                this.#toolUseStartTimes[toolUse.toolUseId] = Date.now()
-            }
-
-            try {
-                // TODO: Can we move this check in the event parser before the stream completes?
-                const availableToolNames = this.#getTools(session).map(tool => tool.toolSpecification.name)
-                if (!availableToolNames.includes(toolUse.name)) {
-                    throw new Error(`Tool ${toolUse.name} is not available in the current mode`)
-                }
-
-                this.recordChunk(`tool_execution_start - ${toolUse.name}`)
-                this.#toolStartTime = Date.now()
-
-                // remove progress UI
-                await chatResultStream.removeResultBlockAndUpdateUI(progressPrefix + toolUse.toolUseId)
-
-                // fsRead and listDirectory write to an existing card and could show nothing in the current position
-                if (![FS_WRITE, FS_REPLACE, FS_READ, LIST_DIRECTORY].includes(toolUse.name)) {
-                    await this.#showUndoAllIfRequired(chatResultStream, session)
-                }
-                // fsWrite can take a long time, so we render fsWrite  Explanatory upon partial streaming responses.
-                if (toolUse.name !== FS_WRITE && toolUse.name !== FS_REPLACE) {
-                    const { explanation } = toolUse.input as unknown as ExplanatoryParams
-                    if (explanation) {
-                        await chatResultStream.writeResultBlock({
-                            type: 'directive',
-                            messageId: toolUse.toolUseId + SUFFIX_EXPLANATION,
-                            body: explanation,
-                        })
-                    }
-                }
-                switch (toolUse.name) {
-                    case FS_READ:
-                    case LIST_DIRECTORY:
-                    case GREP_SEARCH:
-                    case FILE_SEARCH:
-                    case FS_WRITE:
-                    case FS_REPLACE:
-                    case EXECUTE_BASH: {
-                        const toolMap = {
-                            [FS_READ]: { Tool: FsRead },
-                            [LIST_DIRECTORY]: { Tool: ListDirectory },
-                            [FS_WRITE]: { Tool: FsWrite },
-                            [FS_REPLACE]: { Tool: FsReplace },
-                            [EXECUTE_BASH]: { Tool: ExecuteBash },
-                            [GREP_SEARCH]: { Tool: GrepSearch },
-                            [FILE_SEARCH]: { Tool: FileSearch },
-                        }
-
-                        const { Tool } = toolMap[toolUse.name as keyof typeof toolMap]
-                        const tool = new Tool(this.#features)
-
-                        // For MCP tools, get the permission from McpManager
-                        // const permission = McpManager.instance.getToolPerm('Built-in', toolUse.name)
-                        // If permission is 'alwaysAllow', we don't need to ask for acceptance
-                        // const builtInPermission = permission !== 'alwaysAllow'
-
-                        // Get the approved paths from the session
-                        const approvedPaths = session.approvedPaths
-
-                        // Pass the approved paths to the tool's requiresAcceptance method
-                        const { requiresAcceptance, warning, commandCategory } = await tool.requiresAcceptance(
-                            toolUse.input as any,
-                            approvedPaths
-                        )
-
-                        // Honor built-in permission if available, otherwise use tool's requiresAcceptance
-                        // const requiresAcceptance = builtInPermission || toolRequiresAcceptance
-
-                        if (requiresAcceptance || toolUse.name === EXECUTE_BASH) {
-                            // for executeBash, we till send the confirmation message without action buttons
-                            const confirmationResult = this.#processToolConfirmation(
-                                toolUse,
-                                requiresAcceptance,
-                                warning,
-                                commandCategory
-                            )
-                            cachedButtonBlockId = await chatResultStream.writeResultBlock(confirmationResult)
-                            const isExecuteBash = toolUse.name === EXECUTE_BASH
-                            if (isExecuteBash) {
-                                this.#telemetryController.emitInteractWithAgenticChat(
-                                    'GeneratedCommand',
-                                    tabId,
-                                    session.pairProgrammingMode,
-                                    session.getConversationType(),
-                                    this.#abTestingAllocation?.experimentName,
-                                    this.#abTestingAllocation?.userVariation
-                                )
-                            }
-                            if (requiresAcceptance) {
-                                await this.waitForToolApproval(
-                                    toolUse,
-                                    chatResultStream,
-                                    cachedButtonBlockId,
-                                    session,
-                                    toolUse.name
-                                )
-                            }
-                            if (isExecuteBash) {
-                                this.#telemetryController.emitInteractWithAgenticChat(
-                                    'RunCommand',
-                                    tabId,
-                                    session.pairProgrammingMode,
-                                    session.getConversationType(),
-                                    this.#abTestingAllocation?.experimentName,
-                                    this.#abTestingAllocation?.userVariation
-                                )
-                            }
-                        }
-                        break
-                    }
-                    case CodeReview.toolName:
-                    case DisplayFindings.toolName:
-                        // no need to write tool message for CodeReview or DisplayFindings
-                        break
-                    // — DEFAULT ⇒ Only MCP tools, but can also handle generic tool execution messages
-                    default:
-                        // Get original server and tool names from the mapping
-                        const originalNames = McpManager.instance.getOriginalToolNames(toolUse.name)
-
-                        // Remove explanation field from toolUse.input for MCP tools
-                        // many MCP servers do not support explanation field and it will break the tool if this is altered
-                        if (
-                            originalNames &&
-                            toolUse.input &&
-                            typeof toolUse.input === 'object' &&
-                            'explanation' in toolUse.input
-                        ) {
-                            const { explanation, ...inputWithoutExplanation } = toolUse.input as any
-                            toolUse.input = inputWithoutExplanation
-                        }
-
-                        if (originalNames) {
-                            const { serverName, toolName } = originalNames
-                            const def = McpManager.instance
-                                .getAllTools()
-                                .find(d => d.serverName === serverName && d.toolName === toolName)
-                            if (def) {
-                                const mcpTool = new McpTool(this.#features, def)
-                                const { requiresAcceptance, warning } = await mcpTool.requiresAcceptance(
-                                    serverName,
-                                    toolName
-                                )
-                                if (requiresAcceptance) {
-                                    const confirmation = this.#processToolConfirmation(
-                                        toolUse,
-                                        requiresAcceptance,
-                                        warning,
-                                        undefined,
-                                        toolName // Pass the original tool name here
-                                    )
-                                    cachedButtonBlockId = await chatResultStream.writeResultBlock(confirmation)
-                                    await this.waitForToolApproval(
-                                        toolUse,
-                                        chatResultStream,
-                                        cachedButtonBlockId,
-                                        session,
-                                        toolName
-                                    )
-                                }
-
-                                // Store the blockId in the session for later use
-                                if (toolUse.toolUseId) {
-                                    // Use a type assertion to add the runningCardBlockId property
-                                    const toolUseWithBlockId = {
-                                        ...toolUse,
-                                        cachedButtonBlockId,
-                                    } as typeof toolUse & { cachedButtonBlockId: number }
-
-                                    session.toolUseLookup.set(toolUse.toolUseId, toolUseWithBlockId)
-                                }
-                                break
-                            }
-                        }
-                        break
-                }
-
-                if (toolUse.name === FS_WRITE || toolUse.name === FS_REPLACE) {
-                    const input = toolUse.input as unknown as FsWriteParams | FsReplaceParams
-                    const document = await this.#triggerContext.getTextDocumentFromPath(input.path, true, true)
-
-                    session.toolUseLookup.set(toolUse.toolUseId, {
-                        ...toolUse,
-                        fileChange: { before: document?.getText() },
-                    })
-                }
-
-                if (toolUse.name === CodeReview.toolName) {
-                    try {
-                        let initialInput = JSON.parse(JSON.stringify(toolUse.input))
-                        let ruleArtifacts = await this.#additionalContextProvider.collectWorkspaceRules(tabId)
-                        if (ruleArtifacts !== undefined || ruleArtifacts !== null) {
-                            this.#features.logging.info(`RuleArtifacts: ${JSON.stringify(ruleArtifacts)}`)
-                            let pathsToRulesMap = ruleArtifacts.map(ruleArtifact => ({ path: ruleArtifact.id }))
-                            this.#features.logging.info(`PathsToRules: ${JSON.stringify(pathsToRulesMap)}`)
-                            initialInput['ruleArtifacts'] = pathsToRulesMap
-                        }
-                        toolUse.input = initialInput
-                    } catch (e) {
-                        this.#features.logging.warn(`could not parse CodeReview tool input: ${e}`)
-                    }
-                }
-
-                // After approval, add the path to the approved paths in the session
-                const inputPath = (toolUse.input as any)?.path || (toolUse.input as any)?.cwd
-                if (inputPath) {
-                    session.addApprovedPath(inputPath)
-                }
-
-                const ws = this.#getWritableStream(chatResultStream, toolUse)
-                const result = await this.#features.agent.runTool(toolUse.name, toolUse.input, token, ws)
-
-                let toolResultContent: ToolResultContentBlock
-
-                if (typeof result === 'string') {
-                    toolResultContent = { text: result }
-                } else if (Array.isArray(result)) {
-                    toolResultContent = { json: { items: result } }
-                } else if (typeof result === 'object') {
-                    toolResultContent = { json: result }
-                } else toolResultContent = { text: JSON.stringify(result) }
-                this.#validateToolResult(toolUse, toolResultContent)
-
-                results.push({
-                    toolUseId: toolUse.toolUseId,
-                    status: 'success',
-                    content: [toolResultContent],
-                })
-
-                switch (toolUse.name) {
-                    case FS_READ:
-                    case LIST_DIRECTORY:
-                    case FILE_SEARCH:
-                        const initialListDirResult = this.#processReadOrListOrSearch(toolUse, chatResultStream)
-                        if (initialListDirResult) {
-                            await chatResultStream.writeResultBlock(initialListDirResult)
-                        }
-                        break
-                    // no need to write tool result for listDir,fsRead,fileSearch into chat stream
-                    case EXECUTE_BASH:
-                        // no need to write tool result for listDir and fsRead into chat stream
-                        // executeBash will stream the output instead of waiting until the end
-                        break
-                    case GREP_SEARCH:
-                        const grepSearchResult = this.#processGrepSearchResult(toolUse, result, chatResultStream)
-                        if (grepSearchResult) {
-                            await chatResultStream.writeResultBlock(grepSearchResult)
-                        }
-                        break
-                    case FS_REPLACE:
-                    case FS_WRITE:
-                        const input = toolUse.input as unknown as FsWriteParams | FsReplaceParams
-                        // Load from the filesystem instead of workspace.
-                        // Workspace is likely out of date - when files
-                        // are modified external to the IDE, many IDEs
-                        // will only update their file contents (which
-                        // then propagates to the LSP) if/when that
-                        // document receives focus.
-                        const doc = await this.#triggerContext.getTextDocumentFromPath(input.path, false, true)
-                        const chatResult = await this.#getFsWriteChatResult(toolUse, doc, session)
-                        const cachedToolUse = session.toolUseLookup.get(toolUse.toolUseId)
-                        if (cachedToolUse) {
-                            session.toolUseLookup.set(toolUse.toolUseId, {
-                                ...cachedToolUse,
-                                chatResult,
-                                fileChange: { ...cachedToolUse.fileChange, after: doc?.getText() },
-                            })
-                        }
-                        this.#telemetryController.emitInteractWithAgenticChat(
-                            'GeneratedDiff',
-                            tabId,
-                            session.pairProgrammingMode,
-                            session.getConversationType(),
-                            this.#abTestingAllocation?.experimentName,
-                            this.#abTestingAllocation?.userVariation
-                        )
-                        await chatResultStream.writeResultBlock(chatResult)
-                        break
-                    case CodeReview.toolName:
-                        // no need to write tool result for code review, this is handled by model via chat
-                        // Push result in message so that it is picked by IDE plugin to show in issues panel
-                        const codeReviewResult = result as InvokeOutput
-                        if (
-                            codeReviewResult?.output?.kind === 'json' &&
-                            codeReviewResult.output.success &&
-                            (codeReviewResult.output.content as any)?.findingsByFile
-                        ) {
-                            await chatResultStream.writeResultBlock({
-                                type: 'tool',
-                                messageId: toolUse.toolUseId + CODE_REVIEW_FINDINGS_MESSAGE_SUFFIX,
-                                body: (codeReviewResult.output.content as any).findingsByFile,
-                            })
-                        }
-                        break
-                    case DisplayFindings.toolName:
-                        // no need to write tool result for code review, this is handled by model via chat
-                        // Push result in message so that it is picked by IDE plugin to show in issues panel
-                        const displayFindingsResult = result as InvokeOutput
-                        if (
-                            displayFindingsResult?.output?.kind === 'json' &&
-                            displayFindingsResult.output.success &&
-                            displayFindingsResult.output.content !== undefined
-                        ) {
-                            await chatResultStream.writeResultBlock({
-                                type: 'tool',
-                                messageId: toolUse.toolUseId + DISPLAY_FINDINGS_MESSAGE_SUFFIX,
-                                body: JSON.stringify(displayFindingsResult.output.content),
-                            })
-                        }
-                        break
-                    // — DEFAULT ⇒ MCP tools
-                    default:
-                        await this.#handleMcpToolResult(toolUse, result, session, chatResultStream)
-                        break
-                }
-                this.#updateUndoAllState(toolUse, session)
-
-                if (toolUse.name && toolUse.toolUseId) {
-                    // Calculate latency if we have a start time for this tool use
-                    let latency: number | undefined = undefined
-                    if (this.#toolUseStartTimes[toolUse.toolUseId]) {
-                        latency = Date.now() - this.#toolUseStartTimes[toolUse.toolUseId]
-                        delete this.#toolUseStartTimes[toolUse.toolUseId]
-
-                        if (latency !== undefined) {
-                            this.#toolUseLatencies.push({
-                                toolName: toolUse.name,
-                                toolUseId: toolUse.toolUseId,
-                                latency: latency,
-                            })
-                        }
-                    }
-
-                    this.#telemetryController.emitToolUseSuggested(
-                        toolUse,
-                        session.conversationId ?? '',
-                        this.#features.runtime.serverInfo.version ?? '',
-                        latency,
-                        session.pairProgrammingMode,
-                        this.#abTestingAllocation?.experimentName,
-                        this.#abTestingAllocation?.userVariation,
-                        'Succeeded'
-                    )
-                }
-            } catch (err) {
-                await this.#showUndoAllIfRequired(chatResultStream, session)
-                if (this.isUserAction(err, token)) {
-                    // Handle ToolApprovalException for any tool
-                    if (err instanceof ToolApprovalException && cachedButtonBlockId) {
-                        await chatResultStream.overwriteResultBlock(
-                            this.#getUpdateToolConfirmResult(toolUse, false, toolUse.name),
-                            cachedButtonBlockId
-                        )
-                        if (err.shouldShowMessage) {
-                            await chatResultStream.writeResultBlock({
-                                type: 'answer',
-                                messageId: `reject-message-${toolUse.toolUseId}`,
-                                body: err.message || 'Command was rejected.',
-                            })
-                        }
-                    } else if (err instanceof ToolApprovalException) {
-                        this.#features.logging.warn('Failed to update tool block: no blockId is available.')
-                    }
-
-                    // Handle CancellationError
-                    if (err instanceof CancellationError) {
-                        results.push({
-                            toolUseId: toolUse.toolUseId,
-                            status: ToolResultStatus.ERROR,
-                            content: [{ text: 'Command stopped by user' }],
-                        })
-                        continue
-                    }
-
-                    // Rethrow error for executeBash or any named tool
-                    if (toolUse.name === EXECUTE_BASH || toolUse.name) {
-                        throw err
-                    }
-                } else {
-                    // only emit if this is an actual tool error (not a user rejecting/canceling tool)
-                    this.#telemetryController.emitToolUseSuggested(
-                        toolUse,
-                        session.conversationId ?? '',
-                        this.#features.runtime.serverInfo.version ?? '',
-                        undefined,
-                        session.pairProgrammingMode,
-                        this.#abTestingAllocation?.experimentName,
-                        this.#abTestingAllocation?.userVariation,
-                        'Failed'
-                    )
-                }
-
-                // display fs write failure status in the UX of that file card
-                if ((toolUse.name === FS_WRITE || toolUse.name === FS_REPLACE) && toolUse.toolUseId) {
-                    const existingCard = chatResultStream.getMessageBlockId(toolUse.toolUseId)
-                    const fsParam = toolUse.input as unknown as FsWriteParams | FsReplaceParams
-                    if (fsParam.path) {
-                        const fileName = path.basename(fsParam.path)
-                        const customerFacingError = getCustomerFacingErrorMessage(err)
-                        const errorResult = {
-                            type: 'tool',
-                            messageId: toolUse.toolUseId,
-                            header: {
-                                fileList: {
-                                    filePaths: [fileName],
-                                    details: {
-                                        [fileName]: {
-                                            description: fsParam.path,
-                                        },
-                                    },
-                                },
-                                status: {
-                                    status: 'error',
-                                    icon: 'cancel-circle',
-                                    text: 'Error',
-                                    description: customerFacingError,
-                                },
-                            },
-                        } as ChatResult
-
-                        if (existingCard) {
-                            await chatResultStream.overwriteResultBlock(errorResult, existingCard)
-                        } else {
-                            await chatResultStream.writeResultBlock(errorResult)
-                        }
-                    }
-                } else if (toolUse.name === EXECUTE_BASH && toolUse.toolUseId) {
-                    const existingCard = chatResultStream.getMessageBlockId(toolUse.toolUseId)
-                    const command = (toolUse.input as unknown as ExecuteBashParams).command
-                    const completedErrorResult = {
-                        type: 'tool',
-                        messageId: toolUse.toolUseId,
-                        body: `\`\`\`shell\n${command}\n\`\`\``,
-                        header: {
-                            body: 'shell',
-                            status: {
-                                status: 'success',
-                                icon: 'ok',
-                                text: 'Completed',
-                            },
-                            buttons: [],
-                        },
-                    } as ChatResult
-
-                    if (existingCard) {
-                        await chatResultStream.overwriteResultBlock(completedErrorResult, existingCard)
-                    } else {
-                        this.#features.chat.sendChatUpdate({
-                            tabId,
-                            state: { inProgress: false },
-                            data: {
-                                messages: [completedErrorResult],
-                            },
-                        })
-                    }
-                    this.#stoppedToolUses.add(toolUse.toolUseId)
-                }
-                const errMsg = err instanceof Error ? err.message : 'unknown error'
-                this.#log(`Error running tool ${toolUse.name}:`, errMsg)
-                results.push({
-                    toolUseId: toolUse.toolUseId,
-                    status: ToolResultStatus.ERROR,
-                    content: [{ json: { error: err instanceof Error ? err.message : 'Unknown error' } }],
-                })
-            }
-        }
-
-        return results
-    }
-
     #shouldSendBackErrorContent(toolResult: ToolResult) {
         if (toolResult.status === ToolResultStatus.ERROR) {
             for (const content of toolResult.content ?? []) {
@@ -2137,34 +1587,6 @@ export class AgenticChatController implements ChatHandlers {
             return true
         }
         return false
-    }
-
-    /**
-     * Updates the currentUndoAllId state in the session
-     */
-    #updateUndoAllState(toolUse: ToolUse, session: ChatSessionService) {
-        if (toolUse.name === FS_READ || toolUse.name === LIST_DIRECTORY) {
-            return
-        }
-        if (toolUse.name === FS_WRITE || toolUse.name === FS_REPLACE) {
-            if (session.currentUndoAllId === undefined) {
-                session.currentUndoAllId = toolUse.toolUseId
-            }
-            if (session.currentUndoAllId) {
-                const prev = session.toolUseLookup.get(session.currentUndoAllId)
-                if (prev && toolUse.toolUseId) {
-                    const relatedToolUses = prev.relatedToolUses || new Set()
-                    relatedToolUses.add(toolUse.toolUseId)
-
-                    session.toolUseLookup.set(session.currentUndoAllId, {
-                        ...prev,
-                        relatedToolUses,
-                    })
-                }
-            }
-        } else {
-            session.currentUndoAllId = undefined
-        }
     }
 
     /**
@@ -2215,242 +1637,6 @@ export class AgenticChatController implements ChatHandlers {
 
     #isPromptCanceled(token: CancellationToken | undefined, session: ChatSessionService, promptId: string): boolean {
         return token?.isCancellationRequested === true || !session.isCurrentPrompt(promptId)
-    }
-
-    #validateToolResult(toolUse: ToolUse, result: ToolResultContentBlock) {
-        let maxToolResponseSize
-        switch (toolUse.name) {
-            case FS_READ:
-            case EXECUTE_BASH:
-                // fsRead and executeBash already have truncation logic
-                return
-            case LIST_DIRECTORY:
-                maxToolResponseSize = 50_000
-                break
-            default:
-                maxToolResponseSize = 100_000
-                break
-        }
-        if (
-            (result.text && result.text.length > maxToolResponseSize) ||
-            (result.json && JSON.stringify(result.json).length > maxToolResponseSize)
-        ) {
-            throw Error(`${toolUse.name} ${OUTPUT_LIMIT_EXCEEDS_PARTIAL_MSG} ${maxToolResponseSize}`)
-        }
-    }
-
-    /**
-     * Get a description for the tooltip based on command category
-     * @param commandCategory The category of the command
-     * @returns A descriptive message for the tooltip
-     */
-    #getCommandCategoryDescription(category: CommandCategory): string | undefined {
-        switch (category) {
-            case CommandCategory.Mutate:
-                return 'This command may modify your code and/or files.'
-            case CommandCategory.Destructive:
-                return 'This command may cause significant data loss or damage.'
-            default:
-                return undefined
-        }
-    }
-
-    #getToolOverWritableStream(
-        chatResultStream: AgenticChatResultStream,
-        toolUse: ToolUse
-    ): WritableStream | undefined {
-        const toolMsgId = toolUse.toolUseId!
-
-        return new WritableStream({
-            write: async chunk => {
-                if (this.#stoppedToolUses.has(toolMsgId)) return
-
-                await chatResultStream.removeResultBlockAndUpdateUI(toolMsgId)
-
-                await chatResultStream.writeResultBlock({
-                    type: 'tool',
-                    messageId: toolMsgId,
-                    body: chunk,
-                })
-            },
-            close: async () => {
-                if (this.#stoppedToolUses.has(toolMsgId)) return
-
-                await chatResultStream.removeResultBlockAndUpdateUI(toolMsgId)
-
-                this.#stoppedToolUses.add(toolMsgId)
-            },
-        })
-    }
-
-    #getWritableStream(chatResultStream: AgenticChatResultStream, toolUse: ToolUse): WritableStream | undefined {
-        if (toolUse.name === CodeReview.toolName) {
-            return this.#getToolOverWritableStream(chatResultStream, toolUse)
-        }
-        if (toolUse.name !== EXECUTE_BASH) {
-            return
-        }
-
-        const toolMsgId = toolUse.toolUseId!
-        const chatMsgId = chatResultStream.getResult().messageId
-        let headerEmitted = false
-
-        const initialHeader: ChatMessage['header'] = {
-            body: 'shell',
-            buttons: [this.#renderStopShellCommandButton()],
-        }
-
-        const completedHeader: ChatMessage['header'] = {
-            body: 'shell',
-            status: { status: 'success', icon: 'ok', text: 'Completed' },
-            buttons: [],
-        }
-
-        return new WritableStream({
-            write: async chunk => {
-                if (this.#stoppedToolUses.has(toolMsgId)) return
-
-                await chatResultStream.writeResultBlock({
-                    type: 'tool',
-                    messageId: toolMsgId,
-                    body: chunk,
-                    header: headerEmitted ? undefined : initialHeader,
-                })
-
-                headerEmitted = true
-            },
-
-            close: async () => {
-                if (this.#stoppedToolUses.has(toolMsgId)) return
-
-                await chatResultStream.writeResultBlock({
-                    type: 'tool',
-                    messageId: toolMsgId,
-                    body: '```',
-                    header: completedHeader,
-                })
-
-                await chatResultStream.writeResultBlock({
-                    type: 'answer',
-                    messageId: chatMsgId,
-                    body: '',
-                    header: undefined,
-                })
-
-                this.#stoppedToolUses.add(toolMsgId)
-            },
-        })
-    }
-
-    /**
-     * Creates an updated ChatResult for tool confirmation based on tool type
-     * @param toolUse The tool use object
-     * @param isAccept Whether the tool was accepted or rejected
-     * @param toolType Optional tool type for specialized handling
-     * @returns ChatResult with appropriate confirmation UI
-     */
-    #getUpdateToolConfirmResult(
-        toolUse: ToolUse,
-        isAccept: boolean,
-        originalToolName: string,
-        toolType?: string
-    ): ChatResult {
-        const toolName = originalToolName ?? (toolType || toolUse.name)
-
-        // Handle bash commands with special formatting
-        if (toolName === EXECUTE_BASH) {
-            return {
-                messageId: toolUse.toolUseId,
-                type: 'tool',
-                body: '```shell\n' + (toolUse.input as unknown as ExecuteBashParams).command,
-                header: {
-                    body: 'shell',
-                    ...(isAccept
-                        ? {}
-                        : {
-                              status: {
-                                  status: 'error',
-                                  icon: 'cancel',
-                                  text: 'Rejected',
-                              },
-                          }),
-                    buttons: isAccept ? [this.#renderStopShellCommandButton()] : [],
-                },
-            }
-        }
-
-        // For file operations and other tools, create appropriate confirmation UI
-        let header: {
-            body: string | undefined
-            status: { status: 'info' | 'success' | 'warning' | 'error'; icon: string; text: string }
-        }
-        let body: string | undefined
-
-        switch (toolName) {
-            case FS_REPLACE:
-            case FS_WRITE:
-            case FS_READ:
-            case LIST_DIRECTORY:
-                header = {
-                    body: undefined,
-                    status: {
-                        status: 'success',
-                        icon: 'ok',
-                        text: 'Allowed',
-                    },
-                }
-                break
-
-            case FILE_SEARCH:
-                const searchPath = (toolUse.input as unknown as FileSearchParams).path
-                header = {
-                    body: 'File Search',
-                    status: {
-                        status: isAccept ? 'success' : 'error',
-                        icon: isAccept ? 'ok' : 'cancel',
-                        text: isAccept ? 'Allowed' : 'Rejected',
-                    },
-                }
-                body = `File search ${isAccept ? 'allowed' : 'rejected'}: \`${searchPath}\``
-                break
-
-            default:
-                // Default tool (not only MCP)
-                return {
-                    type: 'tool',
-                    messageId: toolUse.toolUseId!,
-                    summary: {
-                        content: {
-                            header: {
-                                icon: 'tools',
-                                body: `${originalToolName ?? (toolType || toolUse.name)}`,
-                                status: {
-                                    status: isAccept ? 'success' : 'error',
-                                    icon: isAccept ? 'ok' : 'cancel',
-                                    text: isAccept ? 'Completed' : 'Rejected',
-                                },
-                                fileList: undefined,
-                            },
-                        },
-                        collapsedContent: [
-                            {
-                                header: {
-                                    body: 'Parameters',
-                                    status: undefined,
-                                },
-                                body: `\`\`\`json\n${JSON.stringify(toolUse.input, null, 2)}\n\`\`\``,
-                            },
-                        ],
-                    },
-                }
-        }
-
-        return {
-            messageId: this.#getMessageIdForToolUse(toolType, toolUse),
-            type: 'tool',
-            body,
-            header,
-        }
     }
 
     async #renderStoppedShellCommand(tabId: string, messageId: string): Promise<void> {
@@ -2510,7 +1696,7 @@ export class AgenticChatController implements ChatHandlers {
         promptBlockId: number,
         session: ChatSessionService
     ) {
-        const deferred = this.#createDeferred()
+        const deferred = createDeferred()
         session.setDeferredToolExecution(messageId, deferred.resolve, deferred.reject)
         this.#log(`Prompting for compaction approval for messageId: ${messageId}`)
         await deferred.promise
@@ -2544,446 +1730,6 @@ export class AgenticChatController implements ChatHandlers {
             type: 'tool',
             body,
             header,
-        }
-    }
-
-    #renderStopShellCommandButton() {
-        const stopKey = this.#getKeyBinding('aws.amazonq.stopCmdExecution')
-        return {
-            id: BUTTON_STOP_SHELL_COMMAND,
-            text: 'Stop',
-            icon: 'stop',
-            ...(stopKey ? { description: `Stop:  ${stopKey}` } : {}),
-        }
-    }
-
-    #getKeyBinding(commandId: string): string | null {
-        // Check for feature flag
-        const shortcut =
-            this.#features.lsp.getClientInitializeParams()?.initializationOptions?.aws?.awsClientCapabilities?.q
-                ?.shortcut
-        if (!shortcut) {
-            return null
-        }
-        let defaultKey = ''
-        const OS = os.platform()
-
-        switch (commandId) {
-            case 'aws.amazonq.runCmdExecution':
-                defaultKey = OS === 'darwin' ? DEFAULT_MACOS_RUN_SHORTCUT : DEFAULT_WINDOW_RUN_SHORTCUT
-                break
-            case 'aws.amazonq.rejectCmdExecution':
-                defaultKey = OS === 'darwin' ? DEFAULT_MACOS_REJECT_SHORTCUT : DEFAULT_WINDOW_REJECT_SHORTCUT
-                break
-            case 'aws.amazonq.stopCmdExecution':
-                defaultKey = OS === 'darwin' ? DEFAULT_MACOS_STOP_SHORTCUT : DEFAULT_WINDOW_STOP_SHORTCUT
-                break
-            default:
-                this.#log(`#getKeyBinding: ${commandId} shortcut is supported by Q `)
-                break
-        }
-
-        if (defaultKey === '') {
-            return null
-        }
-
-        //TODO: handle case: user change default keybind, suggestion: read `keybinding.json` provided by VSC
-
-        return defaultKey
-    }
-
-    #processToolConfirmation(
-        toolUse: ToolUse,
-        requiresAcceptance: Boolean,
-        warning?: string,
-        commandCategory?: CommandCategory,
-        toolType?: string,
-        builtInPermission?: boolean
-    ): ChatResult {
-        const toolName = toolType || toolUse.name
-        let buttons: Button[] = []
-        let header: {
-            body: string
-            buttons: Button[]
-            icon?: string
-            iconForegroundStatus?: string
-            status?: {
-                status?: Status
-                position?: 'left' | 'right'
-                description?: string
-                icon?: string
-                text?: string
-            }
-        }
-        let body: string | undefined
-
-        // Configure tool-specific UI elements
-        switch (toolName) {
-            case EXECUTE_BASH: {
-                const commandString = (toolUse.input as unknown as ExecuteBashParams).command
-                // get feature flag
-                const shortcut =
-                    this.#features.lsp.getClientInitializeParams()?.initializationOptions?.aws?.awsClientCapabilities?.q
-                        ?.shortcut
-
-                const runKey = this.#getKeyBinding('aws.amazonq.runCmdExecution')
-                const rejectKey = this.#getKeyBinding('aws.amazonq.rejectCmdExecution')
-
-                buttons = requiresAcceptance
-                    ? [
-                          {
-                              id: BUTTON_RUN_SHELL_COMMAND,
-                              text: 'Run',
-                              icon: 'play',
-                              ...(runKey ? { description: `Run:  ${runKey}` } : {}),
-                          },
-                          {
-                              id: BUTTON_REJECT_SHELL_COMMAND,
-                              status: 'dimmed-clear' as Status,
-                              text: 'Reject',
-                              icon: 'cancel',
-                              ...(rejectKey ? { description: `Reject:  ${rejectKey}` } : {}),
-                          },
-                      ]
-                    : []
-
-                const statusIcon =
-                    commandCategory === CommandCategory.Destructive
-                        ? 'warning'
-                        : commandCategory === CommandCategory.Mutate
-                          ? 'info'
-                          : 'none'
-                const statusType =
-                    commandCategory === CommandCategory.Destructive
-                        ? 'warning'
-                        : commandCategory === CommandCategory.Mutate
-                          ? 'info'
-                          : undefined
-
-                header = {
-                    status: requiresAcceptance
-                        ? {
-                              icon: statusIcon,
-                              status: statusType,
-                              position: 'left',
-                              description: this.#getCommandCategoryDescription(
-                                  commandCategory ?? CommandCategory.ReadOnly
-                              ),
-                          }
-                        : {},
-                    body: 'shell',
-                    buttons,
-                }
-                body = '```shell\n' + commandString
-                break
-            }
-
-            case FS_WRITE: {
-                const writeFilePath = (toolUse.input as unknown as FsWriteParams).path
-
-                // Validate the path using our synchronous utility
-                validatePathBasic(writeFilePath)
-
-                this.#debug(`Processing ${toolUse.name} for path: ${writeFilePath}`)
-                buttons = [{ id: BUTTON_ALLOW_TOOLS, text: 'Allow', icon: 'ok', status: 'clear' }]
-                header = {
-                    icon: 'warning',
-                    iconForegroundStatus: 'warning',
-                    body: builtInPermission
-                        ? '#### Allow file modification'
-                        : '#### Allow file modification outside of your workspace',
-                    buttons,
-                }
-                body = builtInPermission
-                    ? `I need permission to modify files.\n\`${writeFilePath}\``
-                    : `I need permission to modify files outside of your workspace.\n\`${writeFilePath}\``
-                break
-            }
-
-            case FS_REPLACE: {
-                const writeFilePath = (toolUse.input as unknown as FsReplaceParams).path
-
-                // For replace, we need to verify the file exists
-                validatePathExists(writeFilePath)
-
-                this.#debug(`Processing ${toolUse.name} for path: ${writeFilePath}`)
-                buttons = [{ id: BUTTON_ALLOW_TOOLS, text: 'Allow', icon: 'ok', status: 'clear' }]
-                header = {
-                    icon: 'warning',
-                    iconForegroundStatus: 'warning',
-                    body: builtInPermission
-                        ? '#### Allow file modification'
-                        : '#### Allow file modification outside of your workspace',
-                    buttons,
-                }
-                body = builtInPermission
-                    ? `I need permission to modify files.\n\`${writeFilePath}\``
-                    : `I need permission to modify files outside of your workspace.\n\`${writeFilePath}\``
-                break
-            }
-
-            case FS_READ:
-            case LIST_DIRECTORY: {
-                buttons = [{ id: BUTTON_ALLOW_TOOLS, text: 'Allow', icon: 'ok', status: 'clear' }]
-                header = {
-                    icon: 'tools',
-                    iconForegroundStatus: 'tools',
-                    body: builtInPermission
-                        ? '#### Allow read-only tools'
-                        : '#### Allow read-only tools outside your workspace',
-                    buttons,
-                }
-
-                if (toolName === FS_READ) {
-                    const paths = (toolUse.input as unknown as FsReadParams).paths
-
-                    // Validate paths using our synchronous utility
-                    validatePathsSync(paths)
-
-                    this.#debug(`Processing ${toolUse.name} for paths: ${JSON.stringify(paths)}`)
-                    const formattedPaths: string[] = []
-                    paths.forEach(element => formattedPaths.push(`\`${element}\``))
-                    body = builtInPermission
-                        ? `I need permission to read files.\n${formattedPaths.join('\n')}`
-                        : `I need permission to read files outside the workspace.\n${formattedPaths.join('\n')}`
-                } else {
-                    const readFilePath = (toolUse.input as unknown as ListDirectoryParams).path
-
-                    // Validate the path using our synchronous utility
-                    validatePathExists(readFilePath)
-
-                    this.#debug(`Processing ${toolUse.name} for path: ${readFilePath}`)
-                    body = builtInPermission
-                        ? `I need permission to list directories.\n\`${readFilePath}\``
-                        : `I need permission to list directories outside the workspace.\n\`${readFilePath}\``
-                }
-                break
-            }
-
-            default: {
-                // — DEFAULT ⇒ MCP tools
-                buttons = [{ id: BUTTON_ALLOW_TOOLS, text: 'Allow', icon: 'ok', status: 'clear' }]
-                header = {
-                    icon: 'tools',
-                    iconForegroundStatus: 'warning',
-                    body: `#### ${toolName}`,
-                    buttons,
-                }
-                body = ' '
-                break
-            }
-        }
-
-        // Determine if this is a built-in tool or MCP tool
-        const isStandardTool = toolName !== undefined && this.#features.agent.getBuiltInToolNames().includes(toolName)
-
-        if (isStandardTool) {
-            return {
-                type: 'tool',
-                messageId: this.#getMessageIdForToolUse(toolType, toolUse),
-                header,
-                body: warning ? (toolName === EXECUTE_BASH ? '' : '\n\n') + body : body,
-            }
-        } else {
-            return {
-                type: 'tool',
-                messageId: toolUse.toolUseId,
-                summary: {
-                    content: {
-                        header: {
-                            icon: 'tools',
-                            body: `${toolName}`,
-                            buttons: [
-                                { id: BUTTON_ALLOW_TOOLS, text: 'Run', icon: 'play', status: 'clear' },
-                                {
-                                    id: BUTTON_REJECT_MCP_TOOL,
-                                    text: 'Reject',
-                                    icon: 'cancel',
-                                    status: 'dimmed-clear' as Status,
-                                },
-                            ],
-                        },
-                    },
-                    collapsedContent: [
-                        {
-                            header: { body: 'Parameters' },
-                            body: `\`\`\`json\n${JSON.stringify(toolUse.input, null, 2)}\n\`\`\``,
-                        },
-                    ],
-                },
-            }
-        }
-    }
-
-    async #getFsWriteChatResult(
-        toolUse: ToolUse,
-        doc: TextDocument | undefined,
-        session: ChatSessionService
-    ): Promise<ChatMessage> {
-        const input = toolUse.input as unknown as FsWriteParams | FsReplaceParams
-        const oldContent = session.toolUseLookup.get(toolUse.toolUseId!)?.fileChange?.before ?? ''
-        // Get just the filename instead of the full path
-        const fileName = path.basename(input.path)
-        const diffChanges = diffLines(oldContent, doc?.getText() ?? '')
-        const changes = diffChanges.reduce(
-            (acc, { count = 0, added, removed }) => {
-                if (added) {
-                    acc.added += count
-                } else if (removed) {
-                    acc.deleted += count
-                }
-                return acc
-            },
-            { added: 0, deleted: 0 }
-        )
-        return {
-            type: 'tool',
-            messageId: toolUse.toolUseId,
-            header: {
-                fileList: {
-                    filePaths: [fileName],
-                    details: {
-                        [fileName]: {
-                            changes,
-                            description: input.path,
-                        },
-                    },
-                },
-                buttons: [{ id: BUTTON_UNDO_CHANGES, text: 'Undo', icon: 'undo' }],
-            },
-        }
-    }
-
-    #processReadOrListOrSearch(toolUse: ToolUse, chatResultStream: AgenticChatResultStream): ChatMessage | undefined {
-        let messageIdToUpdate = toolUse.toolUseId!
-        const currentId = chatResultStream.getMessageIdToUpdateForTool(toolUse.name!)
-
-        if (currentId) {
-            messageIdToUpdate = currentId
-        } else {
-            chatResultStream.setMessageIdToUpdateForTool(toolUse.name!, messageIdToUpdate)
-        }
-        let currentPaths = []
-        if (toolUse.name === FS_READ) {
-            currentPaths = (toolUse.input as unknown as FsReadParams)?.paths
-        } else {
-            currentPaths.push((toolUse.input as unknown as ListDirectoryParams | FileSearchParams)?.path)
-        }
-
-        if (!currentPaths) return
-
-        for (const currentPath of currentPaths) {
-            const existingPaths = chatResultStream.getMessageOperation(messageIdToUpdate)?.filePaths || []
-            // Check if path already exists in the list
-            const isPathAlreadyProcessed = existingPaths.some(path => path.relativeFilePath === currentPath)
-            if (!isPathAlreadyProcessed) {
-                const currentFileDetail = {
-                    relativeFilePath: currentPath,
-                    lineRanges: [{ first: -1, second: -1 }],
-                }
-                chatResultStream.addMessageOperation(messageIdToUpdate, toolUse.name!, [
-                    ...existingPaths,
-                    currentFileDetail,
-                ])
-            }
-        }
-        let title: string
-        const itemCount = chatResultStream.getMessageOperation(messageIdToUpdate)?.filePaths.length
-        const filePathsPushed = chatResultStream.getMessageOperation(messageIdToUpdate)?.filePaths ?? []
-        if (!itemCount) {
-            title = 'Gathering context'
-        } else {
-            title =
-                toolUse.name === FS_READ
-                    ? `${itemCount} file${itemCount > 1 ? 's' : ''} read`
-                    : toolUse.name === FILE_SEARCH
-                      ? `${itemCount} ${itemCount === 1 ? 'directory' : 'directories'} searched`
-                      : `${itemCount} ${itemCount === 1 ? 'directory' : 'directories'} listed`
-        }
-        const details: Record<string, FileDetails> = {}
-        for (const item of filePathsPushed) {
-            details[item.relativeFilePath] = {
-                lineRanges: item.lineRanges,
-                description: item.relativeFilePath,
-            }
-        }
-
-        const fileList: FileList = {
-            rootFolderTitle: title,
-            filePaths: filePathsPushed.map(item => item.relativeFilePath),
-            details,
-        }
-        return {
-            type: 'tool',
-            fileList,
-            messageId: messageIdToUpdate,
-            body: '',
-        }
-    }
-
-    /**
-     * Process grep search results and format them for display in the chat UI
-     */
-    #processGrepSearchResult(
-        toolUse: ToolUse,
-        result: any,
-        chatResultStream: AgenticChatResultStream
-    ): ChatMessage | undefined {
-        if (toolUse.name !== GREP_SEARCH) {
-            return undefined
-        }
-
-        let messageIdToUpdate = toolUse.toolUseId!
-        const currentId = chatResultStream.getMessageIdToUpdateForTool(toolUse.name!)
-
-        if (currentId) {
-            messageIdToUpdate = currentId
-        } else {
-            chatResultStream.setMessageIdToUpdateForTool(toolUse.name!, messageIdToUpdate)
-        }
-
-        // Extract search results from the tool output
-        const output = result.output.content as SanitizedRipgrepOutput
-        if (!output || !output.fileMatches || !Array.isArray(output.fileMatches)) {
-            return {
-                type: 'tool',
-                messageId: messageIdToUpdate,
-                body: 'No search results found.',
-            }
-        }
-
-        // Process the matches into a structured format
-        const matches = output.fileMatches
-        const fileDetails: Record<string, FileDetails> = {}
-
-        // Create file details directly from matches
-        for (const match of matches) {
-            const filePath = match.filePath
-            if (!filePath) continue
-
-            fileDetails[`${filePath} (${match.matches.length} ${match.matches.length <= 1 ? 'result' : 'results'})`] = {
-                description: filePath,
-                lineRanges: [{ first: -1, second: -1 }],
-            }
-        }
-
-        // Create sorted array of file paths
-        const sortedFilePaths = Object.keys(fileDetails)
-
-        // Create the context list for display
-        const query = (toolUse.input as any)?.query || 'search term'
-
-        const contextList: FileList = {
-            rootFolderTitle: `Grepped for "${query}", ${output.matchCount}  ${output.matchCount <= 1 ? 'result' : 'results'} found`,
-            filePaths: sortedFilePaths,
-            details: fileDetails,
-        }
-
-        return {
-            type: 'tool',
-            fileList: contextList,
-            messageId: messageIdToUpdate,
-            body: '',
         }
     }
 
@@ -3708,7 +2454,7 @@ export class AgenticChatController implements ChatHandlers {
 
     async #invalidateAllShellCommands(tabId: string, session: ChatSessionService) {
         for (const [toolUseId, toolUse] of session.toolUseLookup.entries()) {
-            if (toolUse.name !== EXECUTE_BASH || this.#stoppedToolUses.has(toolUseId)) continue
+            if (toolUse.name !== EXECUTE_BASH || this.#toolExecutionManager.stoppedToolUses.has(toolUseId)) continue
 
             const params = toolUse.input as unknown as ExecuteBashParams
             const command = params.command
@@ -3732,7 +2478,7 @@ export class AgenticChatController implements ChatHandlers {
                 },
             })
 
-            this.#stoppedToolUses.add(toolUseId)
+            this.#toolExecutionManager.stoppedToolUses.add(toolUseId)
         }
     }
 
@@ -4170,8 +2916,8 @@ export class AgenticChatController implements ChatHandlers {
             if (!toolUseStartTimes[toolUseId]) {
                 toolUseStartTimes[toolUseId] = Date.now()
                 // Also record in the class-level toolUseStartTimes for latency calculation
-                if (!this.#toolUseStartTimes[toolUseId]) {
-                    this.#toolUseStartTimes[toolUseId] = Date.now()
+                if (!this.#toolExecutionManager.toolUseStartTimes[toolUseId]) {
+                    this.#toolExecutionManager.toolUseStartTimes[toolUseId] = Date.now()
                 }
                 this.#debug(`ToolUseEvent ${toolUseId} started`)
                 toolUseLoadingTimeouts[toolUseId] = setTimeout(async () => {
@@ -4220,19 +2966,7 @@ export class AgenticChatController implements ChatHandlers {
      * Calculates time to first chunk and time between chunks
      */
     recordChunk(chunkType: string) {
-        if (this.#timeToFirstChunk === -1) {
-            this.#timeToFirstChunk = Date.now() - this.#llmRequestStartTime
-            this.#lastChunkTime = Date.now()
-        } else {
-            const timeBetweenChunks = Date.now() - this.#lastChunkTime
-            this.#timeBetweenChunks.push(timeBetweenChunks)
-            this.#lastChunkTime = Date.now()
-            if (chunkType !== 'chunk') {
-                this.#debug(
-                    `Time between chunks [${chunkType}]: ${timeBetweenChunks}ms (total chunks: ${this.#timeBetweenChunks.length})`
-                )
-            }
-        }
+        this.#latencyTracker.recordChunk(chunkType)
     }
 
     onPromptInputOptionChange(params: PromptInputOptionChangeParams) {
@@ -4312,99 +3046,6 @@ export class AgenticChatController implements ChatHandlers {
         } catch (error) {
             this.#log('Error restoring previous chats: ' + error)
         }
-    }
-
-    #createDeferred() {
-        let resolve
-        let reject
-        const promise = new Promise((res, rej) => {
-            resolve = res
-            reject = (e: Error) => rej(e)
-        })
-        return { promise, resolve, reject }
-    }
-
-    /**
-     * Handles the result of an MCP tool execution
-     * @param toolUse The tool use object
-     * @param result The result from running the tool
-     * @param session The chat session
-     * @param chatResultStream The chat result stream for writing/updating blocks
-     */
-    async #handleMcpToolResult(
-        toolUse: ToolUse,
-        result: any,
-        session: ChatSessionService,
-        chatResultStream: AgenticChatResultStream
-    ): Promise<void> {
-        // Early return if name or toolUseId is undefined
-        if (!toolUse.name || !toolUse.toolUseId) {
-            this.#log(`Cannot handle MCP tool result: missing name or toolUseId`)
-            return
-        }
-
-        // Get original server and tool names from the mapping
-        const originalNames = McpManager.instance.getOriginalToolNames(toolUse.name)
-        if (originalNames) {
-            const { serverName, toolName } = originalNames
-            const def = McpManager.instance
-                .getAllTools()
-                .find(d => d.serverName === serverName && d.toolName === toolName)
-            if (def) {
-                // Format the tool result and input as JSON strings
-                const toolInput = JSON.stringify(toolUse.input, null, 2)
-                const toolResultContent = typeof result === 'string' ? result : JSON.stringify(result, null, 2)
-
-                const toolResultCard: ChatMessage = {
-                    type: 'tool',
-                    messageId: toolUse.toolUseId,
-                    summary: {
-                        content: {
-                            header: {
-                                icon: 'tools',
-                                body: `${toolName}`,
-                                fileList: undefined,
-                            },
-                        },
-                        collapsedContent: [
-                            {
-                                header: {
-                                    body: 'Parameters',
-                                },
-                                body: `\`\`\`json\n${toolInput}\n\`\`\``,
-                            },
-                            {
-                                header: {
-                                    body: 'Result',
-                                },
-                                body: `\`\`\`json\n${toolResultContent}\n\`\`\``,
-                            },
-                        ],
-                    },
-                }
-
-                // Get the stored blockId for this tool use
-                const cachedToolUse = session.toolUseLookup.get(toolUse.toolUseId)
-                const cachedButtonBlockId = (cachedToolUse as any)?.cachedButtonBlockId
-
-                if (cachedButtonBlockId !== undefined) {
-                    // Update the existing card with the results
-                    await chatResultStream.overwriteResultBlock(toolResultCard, cachedButtonBlockId)
-                } else {
-                    // Fallback to creating a new card
-                    this.#log(`Warning: No blockId found for tool use ${toolUse.toolUseId}, creating new card`)
-                    await chatResultStream.writeResultBlock(toolResultCard)
-                }
-                return
-            }
-        }
-
-        // Fallback for tools not found in mapping
-        await chatResultStream.writeResultBlock({
-            type: 'tool',
-            messageId: toolUse.toolUseId,
-            body: toolResultMessage(toolUse, result),
-        })
     }
 
     scheduleABTestingFetching(userContext: UserContext | undefined) {
