@@ -13,8 +13,8 @@ type ModelDetails = {
 }
 
 const modelRecord: Record<BedrockModel, ModelDetails> = {
-    [BedrockModel.CLAUDE_3_7_SONNET_20250219_V1_0]: { label: 'Claude 3.7 Sonnet' },
-    [BedrockModel.CLAUDE_SONNET_4_20250514_V1_0]: { label: 'Claude Sonnet 4' },
+    [BedrockModel.CLAUDE_3_7_SONNET_20250219_V1_0]: { label: 'Claude 3.7 Sonnet (ui)' },
+    [BedrockModel.CLAUDE_SONNET_4_20250514_V1_0]: { label: 'Claude Sonnet 4 (ui)' },
 }
 
 const modelOptions = Object.entries(modelRecord).map(([value, { label }]) => ({
