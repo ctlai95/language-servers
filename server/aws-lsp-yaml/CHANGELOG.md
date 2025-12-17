@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.1.24](https://github.com/ctlai95/language-servers/compare/lsp-yaml/v0.1.23...lsp-yaml/v0.1.24) (2025-12-17)
+
+
+### Features
+
+* add client side ide diagnostics to telemetry event ([#1768](https://github.com/ctlai95/language-servers/issues/1768)) ([d08fc6c](https://github.com/ctlai95/language-servers/commit/d08fc6cccb9238cef9c2ba485e116c0516839537))
+* add support for getSupplementalContext LSP API ([#2212](https://github.com/ctlai95/language-servers/issues/2212)) ([2ddcae7](https://github.com/ctlai95/language-servers/commit/2ddcae7a4fac6b89cbc9784911959743ea0a6d11))
+* Adding ATX-FES apis support for transformation ([#2521](https://github.com/ctlai95/language-servers/issues/2521)) ([56ee489](https://github.com/ctlai95/language-servers/commit/56ee4891a2e19b259c129fd531f8b06f763c1b57))
+* **amazonq:** adding MCP registry for governance for Amazon Q ([#2512](https://github.com/ctlai95/language-servers/issues/2512)) ([e8d4bf5](https://github.com/ctlai95/language-servers/commit/e8d4bf588e9b7bc13102b33ee03bd357f9698811))
+
+
+### Bug Fixes
+
+* cve and bump language server runtime version to 0.3.10 ([#2544](https://github.com/ctlai95/language-servers/issues/2544)) ([d06e09f](https://github.com/ctlai95/language-servers/commit/d06e09f1c7c2ce017d0a5b4394cc8d17454e2862))
+* set resolveProvider to false in init handler json and yaml language servers ([#2391](https://github.com/ctlai95/language-servers/issues/2391)) ([e11c544](https://github.com/ctlai95/language-servers/commit/e11c544804e4fbe7dbad3e5373223ba919a34758))
+* use document change events for auto trigger classifier input ([#1912](https://github.com/ctlai95/language-servers/issues/1912)) ([2204da6](https://github.com/ctlai95/language-servers/commit/2204da6193f2030ee546f61c969b1a664d8025e3))
+* Use file context override in the inline completion params for Jupyter Notebook ([#2114](https://github.com/ctlai95/language-servers/issues/2114)) ([91c8398](https://github.com/ctlai95/language-servers/commit/91c839857f8aa4d79098189f9fb620b361c51289))
+* use new language server runtime ([#2023](https://github.com/ctlai95/language-servers/issues/2023)) ([83ea1e4](https://github.com/ctlai95/language-servers/commit/83ea1e42fe52990696eb9b878fa11e2c5331bec5))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @aws/lsp-core bumped from ^0.0.18 to ^0.0.19
+
 ## [0.1.23](https://github.com/aws/language-servers/compare/lsp-yaml/v0.1.22...lsp-yaml/v0.1.23) (2025-11-26)
 
 
